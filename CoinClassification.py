@@ -1,75 +1,91 @@
-import os
 import cv2
+import os
 import numpy as np
-from networkx import edges
-from skimage.feature import local_binary_pattern
+from skimage.feature import graycomatrix, graycoprops
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 
+def preprocess_image(image_path):
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    return img, blur
 
-DATA_DIR = "images"
-RADIUS = 1
-N_POINTS = 8 * RADIUS
-
-def read_image(image_path):
-    image = cv2.imread(image_path)
-    return image
-
-def preprocessing(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    equalized = cv2.equalizeHist(gray)
-    edges = cv2.adaptiveThreshold(equalized, 255,
-                                  cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY_INV, 11, 2)
-    return edges, gray
-
-def extract_features(image_path):
-    image = read_image(image_path)
-    edges, gray = preprocessing(image)
-    contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    coin_features = []
-
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 500:
+def load_dataset(image_root):
+    X = []
+    y = []
+    for label in os.listdir(image_root):
+        label_folder = os.path.join(image_root, label)
+        if not os.path.isdir(label_folder):
             continue
+        for fname in os.listdir(label_folder):
+            if not fname.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+            img_path = os.path.join(label_folder, fname)
+            img, blur = preprocess_image(img_path)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            contours = segment_coins(blur)
+            feats = extract_features(gray, contours)
 
-        x, y, w, h = cv2.boundingRect(cnt)
-        roi = gray[y:y+h, x:x+w]
-        area = cv2.contourArea(cnt)
-        perimeter = cv2.arcLength(cnt, True)
-        circularity = 4 * np.pi * (area / (perimeter ** 2)) if perimeter != 0 else 0
-
-        hu_moments = cv2.HuMoments(cv2.moments(cnt)).flatten()
-
-        lbp = local_binary_pattern(roi, N_POINTS, RADIUS, method='uniform')
-        (hist, _) = np.histogram(lbp.ravel(), bins=np.arange(0, N_POINTS + 3),
-                                 range=(0, N_POINTS + 2))
-        hist = hist.astype("float")
-        hist /= (hist.sum() + 1e-6)
-
-        features = [area, perimeter, circularity] + hu_moments.tolist() + hist.tolist()
-        coin_features.append(features)
-
-    return coin_features
-
-labels = []
-features = []
-
-for coin_label in os.listdir(DATA_DIR):
-    coin_dir = os.path.join(DATA_DIR, coin_label)
-    if os.path.isdir(coin_dir):
-        for image_name in os.listdir(coin_dir):
-            image_path = os.path.join(coin_dir, image_name)
-            feats = extract_features(image_path)
             for f in feats:
-                features.append(f)
-                labels.append(coin_label)
+                X.append(f)
+                y.append(label)
+    return np.array(X), np.array(y)
 
+def segment_coins(blurred_img):
+    edges = cv2.adaptiveThreshold(blurred_img, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours
 
-X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
-clf = SVC(kernel='linear')
-clf.fit(X_train, y_train)
-y_pred = clf.predict(X_test)
-report = classification_report(y_test, y_pred, output_dict=False)
-report
+def extract_glcm_features(gray_img, mask):
+    coin = cv2.bitwise_and(gray_img, gray_img, mask=mask)
+    x, y, w, h = cv2.boundingRect(mask)
+    coin_crop = coin[y:y+h, x:x+w]
+    glcm = graycomatrix(coin_crop, [1], [0], 256, symmetric=True, normed=True)
+    contrast = graycoprops(glcm, 'contrast')[0, 0]
+    energy = graycoprops(glcm, 'energy')[0, 0]
+    homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
+    correlation = graycoprops(glcm, 'correlation')[0, 0]
+    return [contrast, energy, homogeneity, correlation]
+
+def extract_features(gray_img, contours):
+    features = []
+    for cnt in contours:
+        mask = np.zeros(gray_img.shape, np.uint8)
+        cv2.drawContours(mask, [cnt], -1, 255, -1)
+        feats = extract_glcm_features(gray_img, mask)
+        features.append(feats)
+    return np.array(features)
+
+def train_classifier(X, y):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    clf = SVC(kernel='linear', probability=True)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    print("Classification Report:\n", classification_report(y_test, y_pred))
+    return clf
+
+def classify_coin(features, classifier):
+    return classifier.predict(features)
+
+def main(image_path, classifier):
+    img, blur = preprocess_image(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    contours = segment_coins(blur)
+    features = extract_features(gray, contours)
+    labels = classify_coin(features, classifier)
+    for i, cnt in enumerate(contours):
+        x, y, w, h = cv2.boundingRect(cnt)
+        cv2.rectangle(img, (x, y), (x+w, y+h), (0,255,0), 2)
+        cv2.putText(img, labels[i], (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+    cv2.imshow("Detected Coins", img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    X, y = load_dataset("images")
+    classifier = train_classifier(X, y)
+    main("images/R5/R5heads4.png", classifier)
