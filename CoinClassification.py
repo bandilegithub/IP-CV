@@ -1,25 +1,32 @@
 import os
 import cv2
 import numpy as np
+from networkx import edges
 from skimage.feature import local_binary_pattern
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 
-# Constants
+
 DATA_DIR = "images"
 RADIUS = 1
 N_POINTS = 8 * RADIUS
 
-# Feature extraction function
-def extract_features(image_path):
+def read_image(image_path):
     image = cv2.imread(image_path)
+    return image
+
+def preprocessing(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     equalized = cv2.equalizeHist(gray)
     edges = cv2.adaptiveThreshold(equalized, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 11, 2)
+                                  cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY_INV, 11, 2)
+    return edges, gray
 
+def extract_features(image_path):
+    image = read_image(image_path)
+    edges, gray = preprocessing(image)
     contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     coin_features = []
 
@@ -29,16 +36,12 @@ def extract_features(image_path):
 
         x, y, w, h = cv2.boundingRect(cnt)
         roi = gray[y:y+h, x:x+w]
-
-        # Shape features
         area = cv2.contourArea(cnt)
         perimeter = cv2.arcLength(cnt, True)
         circularity = 4 * np.pi * (area / (perimeter ** 2)) if perimeter != 0 else 0
 
-        # Hu Moments
         hu_moments = cv2.HuMoments(cv2.moments(cnt)).flatten()
 
-        # LBP features
         lbp = local_binary_pattern(roi, N_POINTS, RADIUS, method='uniform')
         (hist, _) = np.histogram(lbp.ravel(), bins=np.arange(0, N_POINTS + 3),
                                  range=(0, N_POINTS + 2))
@@ -50,11 +53,9 @@ def extract_features(image_path):
 
     return coin_features
 
-# Example structure to simulate dataset
 labels = []
 features = []
 
-# Assume folder structure: /coin_images/{5c,10c,20c,...}/image.jpg
 for coin_label in os.listdir(DATA_DIR):
     coin_dir = os.path.join(DATA_DIR, coin_label)
     if os.path.isdir(coin_dir):
