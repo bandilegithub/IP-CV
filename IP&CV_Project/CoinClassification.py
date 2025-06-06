@@ -51,6 +51,37 @@ def extract_glcm_features(gray_img, mask):
     correlation = graycoprops(glcm, 'correlation')[0, 0]
     return [contrast, energy, homogeneity, correlation]
 
+def extract_shape_features(image):
+    # Threshold the image to get a binary image
+    _, thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return None, None
+
+    # Assume the largest contour is the coin
+    c = max(contours, key=cv2.contourArea)
+
+    # Hu Moments (7 values)
+    hu_moments = cv2.HuMoments(cv2.moments(c)).flatten()
+
+    # Contour descriptors
+    area = cv2.contourArea(c)
+    perimeter = cv2.arcLength(c, True)
+    circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter != 0 else 0
+    # Eccentricity calculation
+    (x, y), (MA, ma), angle = cv2.fitEllipse(c) if len(c) >= 5 else ((0,0),(0,0),0)
+    eccentricity = np.sqrt(1 - (MA / ma) ** 2) if ma != 0 else 0
+
+    contour_features = {
+        "area": area,
+        "perimeter": perimeter,
+        "circularity": circularity,
+        "eccentricity": eccentricity
+    }
+
+    return hu_moments, contour_features
+
 def extract_features(gray_img, contours):
     features = []
     for cnt in contours:
